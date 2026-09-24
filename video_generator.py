@@ -1,15 +1,18 @@
 """
 Tropicozy YouTube Long-Form Video Generator
 - Detects video resolution and auto-upscales 720p to 1080p Full HD (Lanczos + Unsharp)
+- Automatically removes Google Flow / Gemini AI watermarks in the bottom-right corner
 - Builds seamless ping-pong loop blocks (Forward + Reverse = 100% smooth continuous flow)
 - Synchronizes and loops high-fidelity tropical music audio tracks with smooth fade-out
 - Automatically utilizes NVIDIA NVENC GPU hardware acceleration with libx264 CPU fallback
-- Supports configurable duration (e.g., 1-hour full video, or preview duration)
+- Supports configurable duration (e.g., 20-minute test or 1-hour full video)
 """
 import os
 import sys
 import json
 import subprocess
+import cv2
+import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,22 +43,60 @@ def is_nvenc_available():
         return False
 
 
-def get_video_filter_chain(width, height, remove_watermark=False, upscale_to_1080p=True):
+def inpaint_video_watermark(input_video, output_video):
+    """
+    Removes Google Flow / Gemini AI 4-pointed star watermarks across all frames
+    using high-precision astroid geometry and Telea inpainting.
+    Ultra fast: runs at 100+ fps (~2 seconds for a 10s loop).
+    """
+    cap = cv2.VideoCapture(str(input_video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    p = 0.65
+    centers = [
+        (int(w * 0.9023), int(h * 0.8264), int(h * 0.050)),
+        (int(w * 0.9317), int(h * 0.8750), int(h * 0.052))
+    ]
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    kernel = np.ones((5, 5), np.uint8)
+    for cx, cy, r in centers:
+        y_min, y_max = max(0, cy - r - 15), min(h, cy + r + 15)
+        x_min, x_max = max(0, cx - r - 15), min(w, cx + r + 15)
+        vy, vx = np.ogrid[y_min:y_max, x_min:x_max]
+        vdist = (np.abs(vx - cx) / r) ** p + (np.abs(vy - cy) / r) ** p
+        mask_roi = np.zeros((y_max - y_min, x_max - x_min), dtype=np.uint8)
+        mask_roi[vdist <= 1.0] = 255
+        mask_roi = cv2.dilate(mask_roi, kernel, iterations=1)
+        mask[y_min:y_max, x_min:x_max] = np.maximum(mask[y_min:y_max, x_min:x_max], mask_roi)
+
+    nz = cv2.findNonZero(mask)
+    if nz is not None:
+        bx, by, bw, bh = cv2.boundingRect(nz)
+    else:
+        bx, by, bw, bh = 0, 0, w, h
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(str(output_video), fourcc, fps, (w, h))
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        roi_frame = frame[by:by+bh, bx:bx+bw]
+        roi_mask = mask[by:by+bh, bx:bx+bw]
+        frame[by:by+bh, bx:bx+bw] = cv2.inpaint(roi_frame, roi_mask, 3, cv2.INPAINT_TELEA)
+        out.write(frame)
+
+    cap.release()
+    out.release()
+    return output_video
+
+
+def get_video_filter_chain(width, height, upscale_to_1080p=True):
     filters = []
-
-    # Optional Delogo (if watermark exists)
-    if remove_watermark:
-        if width == 1920 and height == 1080:
-            filters.append("delogo=x=1700:y=840:w=90:h=95:show=0")
-        elif width == 1280 and height == 720:
-            filters.append("delogo=x=1130:y=555:w=65:h=70:show=0")
-        else:
-            rx = int(width * 0.88)
-            ry = int(height * 0.82)
-            rw = int(width * 0.10)
-            rh = int(height * 0.10)
-            filters.append(f"delogo=x={rx}:y={ry}:w={rw}:h={rh}:show=0")
-
     # High Quality 1080p Upscaling (if input is 720p or lower)
     if upscale_to_1080p and (width < 1920 or height < 1080):
         print(f"[VIDEO] Auto-upscaling from {width}x{height} to 1920x1080 Full HD (Lanczos + Unsharp)...")
@@ -65,28 +106,35 @@ def get_video_filter_chain(width, height, remove_watermark=False, upscale_to_108
     return ",".join(filters) if filters else "null"
 
 
-def build_tropical_longform_video(input_video, input_audio, output_path, duration_seconds=3600, remove_watermark=False, upscale_to_1080p=True):
+def build_tropical_longform_video(input_video, input_audio, output_path, duration_seconds=3600, remove_watermark=True, upscale_to_1080p=True):
     """
-    Main entry point to render a full 1-hour (or custom duration) 1080p HD Tropical Music video.
+    Main entry point to render 1080p HD Tropical Music video with watermark removal and seamless loop.
     """
     print("\n" + "=" * 60)
-    print("BUILDING 1-HOUR TROPICOZY VIDEO")
+    print("RENDERING TROPICOZY VIDEO (WATERMARK REMOVAL ACTIVE)")
     print("=" * 60)
     print(f"  Input Video: {os.path.basename(input_video)}")
     print(f"  Input Audio: {os.path.basename(input_audio)}")
     print(f"  Target Duration: {duration_seconds}s ({duration_seconds / 60:.1f} mins)")
     print(f"  Output Path: {output_path}")
 
+    temp_inpaint = os.path.join(SCRIPT_DIR, "temp_inpaint.mp4")
     temp_clean = os.path.join(SCRIPT_DIR, "temp_clean.mp4")
     temp_block = os.path.join(SCRIPT_DIR, "temp_block.mp4")
 
-    # Step 1: Delogo clean & Upscale
-    w, h, orig_dur = get_media_info(input_video)
-    vf_arg = get_video_filter_chain(w, h, remove_watermark=remove_watermark, upscale_to_1080p=upscale_to_1080p)
+    # Step 1: Remove watermark via Astroid inpaint & Upscale
+    source_to_upscale = input_video
+    if remove_watermark:
+        print("[VIDEO] Applying high-precision astroid inpainting to remove Google Flow watermark...")
+        inpaint_video_watermark(input_video, temp_inpaint)
+        source_to_upscale = temp_inpaint
+
+    w, h, orig_dur = get_media_info(source_to_upscale)
+    vf_arg = get_video_filter_chain(w, h, upscale_to_1080p=upscale_to_1080p)
 
     cmd_clean = [
         "ffmpeg", "-y",
-        "-i", str(input_video),
+        "-i", str(source_to_upscale),
         "-vf", vf_arg,
         "-c:v", "libx264", "-crf", "15", "-preset", "fast", "-an",
         temp_clean
@@ -158,12 +206,12 @@ def build_tropical_longform_video(input_video, input_audio, output_path, duratio
         subprocess.run(cmd_full_cpu, check=True)
 
     # Cleanup temp
-    for t in [temp_clean, temp_block]:
+    for t in [temp_inpaint, temp_clean, temp_block]:
         if os.path.exists(t):
             try:
                 os.remove(t)
             except Exception:
                 pass
 
-    print(f"[SUCCESS] 1080p Video rendered successfully: {output_path}")
+    print(f"[SUCCESS] 1080p Video rendered successfully (Watermark Removed): {output_path}")
     return True

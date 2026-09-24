@@ -49,7 +49,7 @@ def main():
         input_audio=aud_path,
         output_path=out_path,
         duration_seconds=args.duration,
-        remove_watermark=False,
+        remove_watermark=True,
         upscale_to_1080p=True
     )
 

@@ -219,7 +219,7 @@ def run_pipeline(duration=3600, dry_run=False, video_override=None, audio_overri
         input_audio=aud_path,
         output_path=final_video_path,
         duration_seconds=duration,
-        remove_watermark=False,
+        remove_watermark=True,
         upscale_to_1080p=True
     )
 

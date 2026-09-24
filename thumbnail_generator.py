@@ -1,7 +1,7 @@
 """
 Tropicozy YouTube Thumbnail Generator
 - Generates high-CTR tropical music thumbnails (1280x720)
-- Automatically detects and removes AI/Gemini watermarks via OpenCV inpainting
+- Automatically detects and removes Gemini / Google Flow AI watermarks via OpenCV inpainting
 - Clean, aesthetic typography (Cinzel / Playfair)
 - Rich tropical atmosphere, vibrant island colors, and 1-Hour badge
 """
@@ -29,19 +29,34 @@ TROPICAL_HOOKS = [
 
 
 def remove_watermark(cv_img):
-    """Removes corner AI watermarks seamlessly using OpenCV inpainting."""
+    """
+    Removes Google Flow / Gemini AI 4-pointed star watermarks in the bottom-right corner
+    using precise astroid geometry and Telea inpainting.
+    """
     h, w = cv_img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
+    p = 0.65
 
-    # Watermark zone in bottom-right corner
-    sx1 = int(w * 0.88)
-    sy1 = int(h * 0.82)
-    sx2 = int(w * 0.98)
-    sy2 = int(h * 0.96)
-    mask[sy1:sy2, sx1:sx2] = 255
+    # Target candidate centers for Google Flow image and video watermarks:
+    # 1. Native image location (ratios 0.9317, 0.875)
+    # 2. Converted video location (ratios 0.9023, 0.8264)
+    centers = [
+        (int(w * 0.9317), int(h * 0.875), int(h * 0.052)),
+        (int(w * 0.9023), int(h * 0.8264), int(h * 0.050))
+    ]
 
-    inpainted = cv2.inpaint(cv_img, mask, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
-    return inpainted
+    kernel = np.ones((5, 5), np.uint8)
+    for cx, cy, r in centers:
+        y_min, y_max = max(0, cy - r - 15), min(h, cy + r + 15)
+        x_min, x_max = max(0, cx - r - 15), min(w, cx + r + 15)
+        vy, vx = np.ogrid[y_min:y_max, x_min:x_max]
+        vdist = (np.abs(vx - cx) / r) ** p + (np.abs(vy - cy) / r) ** p
+        mask_roi = np.zeros((y_max - y_min, x_max - x_min), dtype=np.uint8)
+        mask_roi[vdist <= 1.0] = 255
+        mask_roi = cv2.dilate(mask_roi, kernel, iterations=1)
+        mask[y_min:y_max, x_min:x_max] = np.maximum(mask[y_min:y_max, x_min:x_max], mask_roi)
+
+    return cv2.inpaint(cv_img, mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
 
 def get_font(font_name="Cinzel.ttf", size=56):
@@ -84,7 +99,7 @@ def apply_tropical_vignette(img, intensity=0.25):
 
 def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=None, badge_text=None):
     """
-    Creates a clean, high-converting Tropical Music YouTube thumbnail (1280x720).
+    Creates a clean, high-converting Tropical Music YouTube thumbnail (1280x720) with watermark removal.
     """
     if not main_text:
         preset = random.choice(TROPICAL_HOOKS)
@@ -168,7 +183,7 @@ def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=Non
     final = Image.alpha_composite(img, overlay).convert("RGB")
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     final.save(output_path, quality=96)
-    print(f"[+] Generated Tropical Thumbnail: {output_path}")
+    print(f"[+] Generated Tropical Thumbnail (Watermark Removed): {output_path}")
     return output_path
 
 
