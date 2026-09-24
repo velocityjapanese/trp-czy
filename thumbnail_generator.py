@@ -8,6 +8,7 @@ Tropicozy YouTube Thumbnail Generator
 import os
 import sys
 import random
+import subprocess
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
@@ -59,6 +60,39 @@ def remove_watermark(cv_img):
     return cv2.inpaint(cv_img, mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
 
+def apply_3d_lut(cv_img, lut_path=None):
+    """Applies the Cinematic 3D LUT (tropical_cinematic.cube) to a CV2 image."""
+    if lut_path is None:
+        lut_path = os.path.join(SCRIPT_DIR, "assets", "luts", "tropical_cinematic.cube")
+    if not os.path.exists(lut_path):
+        return cv_img
+
+    temp_in = os.path.join(SCRIPT_DIR, "temp_lut_thumb_in.png")
+    temp_out = os.path.join(SCRIPT_DIR, "temp_lut_thumb_out.png")
+    try:
+        cv2.imwrite(temp_in, cv_img)
+        safe_lut = lut_path.replace("\\", "/").replace(":", "\\:")
+        cmd = [
+            "ffmpeg", "-y", "-v", "error",
+            "-i", temp_in,
+            "-vf", f"lut3d=file='{safe_lut}':interp=tetrahedral",
+            temp_out
+        ]
+        subprocess.run(cmd, check=True)
+        graded = cv2.imread(temp_out)
+        return graded if graded is not None else cv_img
+    except Exception as e:
+        print(f"[THUMBNAIL] 3D LUT notice: {e}")
+        return cv_img
+    finally:
+        for t in [temp_in, temp_out]:
+            if os.path.exists(t):
+                try:
+                    os.remove(t)
+                except Exception:
+                    pass
+
+
 def get_font(font_name="Cinzel.ttf", size=56):
     """Load font with fallback hierarchy."""
     font_path = os.path.join(SCRIPT_DIR, "assets", "fonts", font_name)
@@ -99,7 +133,8 @@ def apply_tropical_vignette(img, intensity=0.25):
 
 def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=None, badge_text=None):
     """
-    Creates a clean, high-converting Tropical Music YouTube thumbnail (1280x720) with watermark removal.
+    Creates a clean, high-converting Tropical Music YouTube thumbnail (1280x720)
+    with watermark removal, Cinematic 3D LUT color grading, and centered typography.
     """
     if not main_text:
         preset = random.choice(TROPICAL_HOOKS)
@@ -109,11 +144,12 @@ def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=Non
     elif not badge_text:
         badge_text = "1 HOUR · 1080p HD"
 
-    # 1. Load image & Inpaint watermark
+    # 1. Load image, inpaint watermark, and apply Cinematic 3D LUT
     cv_img = cv2.imread(bg_path)
     if cv_img is not None:
         clean_cv = remove_watermark(cv_img)
-        rgb_img = cv2.cvtColor(clean_cv, cv2.COLOR_BGR2RGB)
+        graded_cv = apply_3d_lut(clean_cv)
+        rgb_img = cv2.cvtColor(graded_cv, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb_img).convert("RGBA")
     else:
         img = Image.open(bg_path).convert("RGBA")
@@ -132,10 +168,6 @@ def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=Non
         img = img.crop((0, offset, img.width, offset + new_h))
 
     img = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-    # Enhance tropical warmth & lushness
-    img = ImageEnhance.Color(img).enhance(1.15)
-    img = ImageEnhance.Contrast(img).enhance(1.08)
 
     # 2. Add vignette
     img = apply_tropical_vignette(img, intensity=0.25)
@@ -163,22 +195,31 @@ def create_tropical_thumbnail(bg_path, output_path, main_text=None, sub_text=Non
         draw.text((x_pos + dx, y_base + dy), main_text.upper(), font=font_main, fill=(0, 0, 0, 240))
     draw.text((x_pos, y_base), main_text.upper(), font=font_main, fill=(255, 255, 255, 255))
 
-    # Top-Right Badge
+    # Top-Right Badge (Centered perfectly with anchor='mm')
     bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
-    bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    bx = target_w - bw - 70
-    by = 45
-    padding_x = 18
-    padding_y = 10
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    padding_x = 22
+    padding_y = 12
+    box_w = text_w + padding_x * 2
+    box_h = text_h + padding_y * 2
+
+    box_x2 = target_w - 60
+    box_x1 = box_x2 - box_w
+    box_y1 = 45
+    box_y2 = box_y1 + box_h
 
     draw.rounded_rectangle(
-        [bx - padding_x, by - padding_y, bx + bw + padding_x, by + bh + padding_y],
-        radius=10,
-        fill=(10, 25, 20, 200),
-        outline=(255, 200, 50, 200),
+        [box_x1, box_y1, box_x2, box_y2],
+        radius=12,
+        fill=(10, 25, 20, 210),
+        outline=(255, 200, 50, 220),
         width=2
     )
-    draw.text((bx, by), badge_text, font=font_badge, fill=(255, 245, 210, 255))
+
+    badge_cx = (box_x1 + box_x2) / 2
+    badge_cy = (box_y1 + box_y2) / 2
+    draw.text((badge_cx, badge_cy), badge_text, font=font_badge, fill=(255, 245, 210, 255), anchor="mm")
 
     final = Image.alpha_composite(img, overlay).convert("RGB")
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
