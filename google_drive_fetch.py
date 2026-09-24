@@ -1,246 +1,234 @@
 """
-Google Drive Fetch Module for Tropicozy
-Fetches videos, music, and images from Google Drive folders using Service Account credentials.
-Supports weighted random reposting when all items have been published.
+Google Drive Integration Module for Tropicozy
+Fetches:
+1. Video Loops (MP4) from GOOGLE_DRIVE_VIDEO_FOLDER_ID
+2. Audio Tracks (MP3/WAV) from GOOGLE_DRIVE_AUDIO_FOLDER_ID
+3. Thumbnail Images (JPG/PNG) from GOOGLE_DRIVE_IMAGE_FOLDER_ID
+
+Supports:
+- Unpublished track priority
+- Infinite circulation mode (Weighted Least-Recently-Used selection)
+- Dynamic remixing across video, audio, and thumbnail assets
+- Local folder fallback (input_videos, input_audio, input_images)
 """
 import os
-import sys
+import io
 import json
+import sys
+import glob
 import random
-import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
-from googleapiclient.http import MediaIoBaseDownload
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 load_dotenv()
 
-# Google Drive folder IDs
-MUSIC_FOLDER_ID = os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "1_BE7XGZBUiGUGfXZZVuA22Arek9fOYzs")
-IMAGES_FOLDER_ID = os.getenv("GOOGLE_DRIVE_IMAGES_FOLDER_ID", "1433aZGIv1ujDx7l7s7k0NUAdX37wkSpe")
-VIDEOS_FOLDER_ID = os.getenv("GOOGLE_DRIVE_VIDEOS_FOLDER_ID", "1JN7vSSwtsw6DVKI8VODgDq3_6qx9xPcS")
+GOOGLE_DRIVE_VIDEO_FOLDER_ID = os.getenv("GOOGLE_DRIVE_VIDEO_FOLDER_ID", os.getenv("GOOGLE_DRIVE_VIDEOS_FOLDER_ID", "1JN7vSSwtsw6DVKI8VODgDq3_6qx9xPcS"))
+GOOGLE_DRIVE_AUDIO_FOLDER_ID = os.getenv("GOOGLE_DRIVE_AUDIO_FOLDER_ID", os.getenv("GOOGLE_DRIVE_MUSIC_FOLDER_ID", "1_BE7XGZBUiGUGfXZZVuA22Arek9fOYzs"))
+GOOGLE_DRIVE_IMAGE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_IMAGE_FOLDER_ID", os.getenv("GOOGLE_DRIVE_IMAGES_FOLDER_ID", "1433aZGIv1ujDx7l7s7k0NUAdX37wkSpe"))
+GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY", "service_account.json")
 
-GOOGLE_SERVICE_ACCOUNT_KEY = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+LOCAL_VIDEO_DIR = os.getenv("LOCAL_VIDEO_DIR", "input_videos")
+LOCAL_AUDIO_DIR = os.getenv("LOCAL_AUDIO_DIR", "input_audio")
+LOCAL_IMAGE_DIR = os.getenv("LOCAL_IMAGE_DIR", "input_images")
+PUBLISHED_LOG = "published_videos.json"
 
-LOCAL_VIDEOS_DIR = Path("Videos")
-LOCAL_MUSIC_DIR = Path("Music")
-LOCAL_IMAGES_DIR = Path("Images")
-PUBLISHED_LOG = Path("published_videos.json")
-
-
-def get_published_records():
-    """Retrieve full history of published items."""
-    if PUBLISHED_LOG.exists():
-        try:
-            with open(PUBLISHED_LOG, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-
-def get_published_names():
-    """Get list of video/asset names that were already published."""
-    records = get_published_records()
-    names = []
-    for r in records:
-        if isinstance(r, dict):
-            names.append(r.get("video_name") or r.get("asset_name", ""))
-        elif isinstance(r, str):
-            names.append(r)
-    return [n for n in names if n]
-
-
-def get_repost_counts():
-    """Count how many times each item has been published."""
-    names = get_published_names()
-    counts = {}
-    for n in names:
-        counts[n] = counts.get(n, 0) + 1
-    return counts
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
 def get_drive_service():
-    """Authenticate and build Google Drive API service."""
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    """Build and return an authorized Google Drive v3 service instance."""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError:
+        print("[DRIVE] Google API libraries not installed.")
+        return None
 
     if not GOOGLE_SERVICE_ACCOUNT_KEY:
-        raise ValueError("GOOGLE_SERVICE_ACCOUNT_KEY is not set.")
-
-    key_str = GOOGLE_SERVICE_ACCOUNT_KEY.strip()
-
-    # Check if key is a file path
-    if os.path.exists(key_str):
-        creds = service_account.Credentials.from_service_account_file(key_str, scopes=scopes)
-        return build("drive", "v3", credentials=creds)
-
-    # Check if key is JSON content
-    if key_str.startswith("{"):
-        info = json.loads(key_str)
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        return build("drive", "v3", credentials=creds)
-
-    raise ValueError("GOOGLE_SERVICE_ACCOUNT_KEY format unrecognized (not a valid file path or JSON object).")
-
-
-def list_files_in_folder(service, folder_id, mime_filter=None):
-    """List all non-trashed files in a Google Drive folder."""
-    if not service or not folder_id:
-        return []
+        return None
 
     try:
-        query = f"'{folder_id}' in parents and trashed=false"
-        files = []
-        page_token = None
+        key_str = GOOGLE_SERVICE_ACCOUNT_KEY.strip()
+        if key_str.startswith("{"):
+            info = json.loads(key_str)
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return build("drive", "v3", credentials=credentials)
+        elif os.path.exists(GOOGLE_SERVICE_ACCOUNT_KEY):
+            credentials = service_account.Credentials.from_service_account_file(GOOGLE_SERVICE_ACCOUNT_KEY, scopes=SCOPES)
+            return build("drive", "v3", credentials=credentials)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            sa_path = os.path.join(script_dir, GOOGLE_SERVICE_ACCOUNT_KEY)
+            if os.path.exists(sa_path):
+                credentials = service_account.Credentials.from_service_account_file(sa_path, scopes=SCOPES)
+                return build("drive", "v3", credentials=credentials)
+            return None
+    except Exception as e:
+        print(f"[DRIVE ERROR] Failed to initialize Google Drive: {e}")
+        return None
 
-        while True:
-            response = service.files().list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType, size)",
-                pageToken=page_token,
-                pageSize=100
-            ).execute()
 
-            for f in response.get("files", []):
-                if mime_filter:
-                    if any(m in f.get("mimeType", "") for m in mime_filter):
-                        files.append(f)
-                else:
-                    files.append(f)
-
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
-
-        files.sort(key=lambda x: x.get("name", ""))
+def list_files_in_folder(folder_id, extensions=None):
+    """List non-trashed files inside a Google Drive folder."""
+    if not folder_id or folder_id.startswith("your_"):
+        return []
+    service = get_drive_service()
+    if not service:
+        return []
+    try:
+        query = f"'{folder_id}' in parents and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name, mimeType, size)",
+            pageSize=100
+        ).execute()
+        files = results.get("files", [])
+        if extensions:
+            filtered = []
+            for f in files:
+                name = f.get("name", "").lower()
+                if any(name.endswith(ext) for ext in extensions):
+                    filtered.append(f)
+            return filtered
         return files
     except Exception as e:
-        print(f"Error listing files in folder {folder_id}: {e}")
+        print(f"[DRIVE ERROR] Error listing files in folder {folder_id}: {e}")
         return []
 
 
-def download_file(service, file_info, local_path):
-    """Download a file from Google Drive."""
-    local_path = Path(local_path)
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"  Downloading '{file_info['name']}'...")
-    request = service.files().get_media(fileId=file_info["id"])
-    with open(local_path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-            if status:
-                print(f"  Progress: {int(status.progress() * 100)}%")
-    print(f"  ✅ Saved: {local_path}")
-    return local_path
-
-
-def fetch_media_assets(allow_repost=True):
-    """
-    Fetch 1 visual asset (video or image) and 1 tropical music track.
-    
-    Returns:
-        dict: {
-            'visual_path': Path,
-            'visual_name': str,
-            'visual_type': 'video' | 'image',
-            'music_path': Path,
-            'music_name': str
-        }
-    """
-    LOCAL_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-    LOCAL_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
-    LOCAL_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-
+def download_file(file_id, dest_path):
+    """Downloads a single file from Google Drive."""
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+    except ImportError:
+        return False
     service = get_drive_service()
     if not service:
-        print("❌ Failed to initialize Google Drive service.")
-        return None
+        return False
+    try:
+        request = service.files().get_media(fileId=file_id)
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        with io.FileIO(dest_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+        return True
+    except Exception as e:
+        print(f"[DRIVE ERROR] Error downloading {file_id}: {e}")
+        return False
 
-    published_names = get_published_names()
+
+def get_repost_counts():
+    """Counts how many times each audio track has been published."""
+    if os.path.exists(PUBLISHED_LOG):
+        try:
+            with open(PUBLISHED_LOG, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                counts = {}
+                for item in data:
+                    sname = (item.get("audio_file") or item.get("audio_name") or item.get("music_name") or "").strip().lower()
+                    if sname:
+                        counts[sname] = counts.get(sname, 0) + 1
+                return counts
+        except Exception:
+            return {}
+    return {}
+
+
+def fetch_assets_triplet(allow_repost=True):
+    """
+    Fetches ONE video, ONE audio track, and ONE thumbnail image.
+    Supports Infinite Circulation Mode with Weighted Least-Recently-Used selection.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vid_dir = os.path.join(script_dir, LOCAL_VIDEO_DIR)
+    aud_dir = os.path.join(script_dir, LOCAL_AUDIO_DIR)
+    img_dir = os.path.join(script_dir, LOCAL_IMAGE_DIR)
+
+    os.makedirs(vid_dir, exist_ok=True)
+    os.makedirs(aud_dir, exist_ok=True)
+    os.makedirs(img_dir, exist_ok=True)
+
+    drive_service = get_drive_service()
+    drive_ready = (drive_service is not None) and bool(GOOGLE_DRIVE_AUDIO_FOLDER_ID) and not GOOGLE_DRIVE_AUDIO_FOLDER_ID.startswith("your_")
+
+    if drive_ready:
+        print("[DRIVE] Querying Google Drive folders for Tropicozy assets...")
+        v_drive = list_files_in_folder(GOOGLE_DRIVE_VIDEO_FOLDER_ID, extensions=[".mp4", ".mov", ".mkv"])
+        a_drive = list_files_in_folder(GOOGLE_DRIVE_AUDIO_FOLDER_ID, extensions=[".mp3", ".wav", ".flac"])
+        i_drive = list_files_in_folder(GOOGLE_DRIVE_IMAGE_FOLDER_ID, extensions=[".jpg", ".jpeg", ".png", ".webp"])
+    else:
+        v_drive, a_drive, i_drive = [], [], []
+
+    local_vids = sorted(glob.glob(os.path.join(vid_dir, "*.mp4")) + glob.glob(os.path.join(vid_dir, "*.mov")))
+    local_auds = sorted(glob.glob(os.path.join(aud_dir, "*.mp3")) + glob.glob(os.path.join(aud_dir, "*.wav")))
+    local_imgs = sorted(glob.glob(os.path.join(img_dir, "*.jpg")) + glob.glob(os.path.join(img_dir, "*.png")) + glob.glob(os.path.join(img_dir, "*.jpeg")))
+
+    # Resolve Audio
     repost_counts = get_repost_counts()
+    sel_audio_path = None
+    is_repost = False
 
-    # 1. Fetch Visual Asset (Primary: Videos, Fallback: Images)
-    video_files = list_files_in_folder(service, VIDEOS_FOLDER_ID, mime_filter=["video/"])
-    print(f"Found {len(video_files)} video(s) in Drive.")
-
-    selected_visual = None
-    visual_type = "video"
-
-    # Filter unpublished videos
-    unpublished_videos = [v for v in video_files if v["name"] not in published_names]
-
-    if unpublished_videos:
-        selected_visual = random.choice(unpublished_videos)
-        print(f"✨ Selected new unpublished video: {selected_visual['name']}")
-    elif video_files and allow_repost:
-        # Weighted random selection: lower repost count = higher weight
-        weights = [max(1, 100 // (repost_counts.get(v["name"], 0) + 1)) for v in video_files]
-        selected_visual = random.choices(video_files, weights=weights, k=1)[0]
-        count = repost_counts.get(selected_visual["name"], 0)
-        print(f"🔄 Reposting video (previously posted {count}x): {selected_visual['name']}")
-    else:
-        # Fallback to images
-        print("No videos found. Checking images folder...")
-        image_files = list_files_in_folder(service, IMAGES_FOLDER_ID, mime_filter=["image/"])
-        if image_files:
-            unpublished_images = [img for img in image_files if img["name"] not in published_names]
-            if unpublished_images:
-                selected_visual = random.choice(unpublished_images)
-            else:
-                selected_visual = random.choice(image_files)
-            visual_type = "image"
-            print(f"🖼️ Selected image: {selected_visual['name']}")
-
-    if not selected_visual:
-        print("❌ No visual assets found in Videos or Images folders.")
-        return None
-
-    # Download visual asset
-    if visual_type == "video":
-        visual_path = LOCAL_VIDEOS_DIR / selected_visual["name"]
-    else:
-        visual_path = LOCAL_IMAGES_DIR / selected_visual["name"]
-
-    if not visual_path.exists() or visual_path.stat().st_size == 0:
-        download_file(service, selected_visual, visual_path)
-    else:
-        print(f"  Visual asset already cached locally: {visual_path.name}")
-
-    # 2. Fetch Tropical Music Track
-    music_files = list_files_in_folder(service, MUSIC_FOLDER_ID, mime_filter=["audio/"])
-    print(f"Found {len(music_files)} music track(s) in Drive.")
-
-    selected_music = None
-    if music_files:
-        selected_music = random.choice(music_files)
-        print(f"🎵 Selected tropical music track: {selected_music['name']}")
-        music_path = LOCAL_MUSIC_DIR / selected_music["name"]
-        if not music_path.exists() or music_path.stat().st_size == 0:
-            download_file(service, selected_music, music_path)
+    if a_drive:
+        unpublished = [f for f in a_drive if f["name"].strip().lower() not in repost_counts]
+        if unpublished:
+            chosen = unpublished[0]
+            is_repost = False
+        elif allow_repost:
+            weights = [max(1, 1000 // (3 ** min(repost_counts.get(f["name"].strip().lower(), 0), 6))) for f in a_drive]
+            chosen = random.choices(a_drive, weights=weights, k=1)[0]
+            is_repost = True
         else:
-            print(f"  Music track already cached locally: {music_path.name}")
-    else:
-        music_path = None
-        print("⚠️ No music tracks found in Music folder.")
+            chosen = None
 
-    return {
-        "visual_path": str(visual_path),
-        "visual_name": selected_visual["name"],
-        "visual_type": visual_type,
-        "music_path": str(music_path) if music_path else None,
-        "music_name": selected_music["name"] if selected_music else None
-    }
+        if chosen:
+            dest = os.path.join(aud_dir, chosen["name"])
+            if not os.path.exists(dest):
+                download_file(chosen["id"], dest)
+            sel_audio_path = dest
 
+    if not sel_audio_path and local_auds:
+        unpublished = [f for f in local_auds if os.path.basename(f).strip().lower() not in repost_counts]
+        if unpublished:
+            sel_audio_path = unpublished[0]
+            is_repost = False
+        elif allow_repost:
+            weights = [max(1, 1000 // (3 ** min(repost_counts.get(os.path.basename(f).strip().lower(), 0), 6))) for f in local_auds]
+            sel_audio_path = random.choices(local_auds, weights=weights, k=1)[0]
+            is_repost = True
 
-if __name__ == "__main__":
-    assets = fetch_media_assets()
-    print("Fetch result:", assets)
+    if not sel_audio_path:
+        print("[ERROR] No audio tracks found in Drive or local input_audio folder.")
+        return None, None, None, False
+
+    # Resolve Video
+    sel_video_path = None
+    if v_drive:
+        chosen_v = v_drive[len(repost_counts) % len(v_drive)] if not is_repost else random.choice(v_drive)
+        dest_v = os.path.join(vid_dir, chosen_v["name"])
+        if not os.path.exists(dest_v):
+            download_file(chosen_v["id"], dest_v)
+        sel_video_path = dest_v
+    elif local_vids:
+        sel_video_path = local_vids[len(repost_counts) % len(local_vids)] if not is_repost else random.choice(local_vids)
+
+    if not sel_video_path:
+        print("[ERROR] No videos found in Drive or local input_videos folder.")
+        return None, None, None, False
+
+    # Resolve Image (for thumbnail)
+    sel_image_path = None
+    if i_drive:
+        chosen_i = i_drive[len(repost_counts) % len(i_drive)] if not is_repost else random.choice(i_drive)
+        dest_i = os.path.join(img_dir, chosen_i["name"])
+        if not os.path.exists(dest_i):
+            download_file(chosen_i["id"], dest_i)
+        sel_image_path = dest_i
+    elif local_imgs:
+        sel_image_path = local_imgs[len(repost_counts) % len(local_imgs)] if not is_repost else random.choice(local_imgs)
+
+    return sel_video_path, sel_audio_path, sel_image_path, is_repost

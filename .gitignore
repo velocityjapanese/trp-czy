@@ -2,25 +2,25 @@
 .env
 .env.local
 
-# Tokens and Credentials
-*.pem
+# Service account & tokens
+service_account.json
 token_*.json
 credentials.json
 client_secrets.json
 
-# Media directories and files
-Videos/
-Processed_Videos/
-Published_Videos/
-Images/
-Music/
-output/
-temp/
+# Media directories & generated artifacts
+input_videos/
+input_audio/
+input_images/
+output_videos/
+output_thumbnails/
+temp_clean.mp4
+temp_block.mp4
 *.mp4
 *.mp3
 *.wav
-*.jpeg
 *.jpg
+*.jpeg
 *.png
 
 # Python
@@ -28,25 +28,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 .venv
 venv/
 ENV/
