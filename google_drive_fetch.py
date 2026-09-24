@@ -122,27 +122,64 @@ def download_file(file_id, dest_path):
         return False
 
 
-def get_repost_counts():
-    """Counts how many times each audio track has been published."""
+def get_usage_counts():
+    """
+    Returns usage counts for audio, video, and image assets from published history.
+    """
+    aud_counts = {}
+    vid_counts = {}
+    img_counts = {}
     if os.path.exists(PUBLISHED_LOG):
         try:
             with open(PUBLISHED_LOG, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                counts = {}
                 for item in data:
-                    sname = (item.get("audio_file") or item.get("audio_name") or item.get("music_name") or "").strip().lower()
-                    if sname:
-                        counts[sname] = counts.get(sname, 0) + 1
-                return counts
+                    a = (item.get("audio_file") or item.get("audio_name") or item.get("music_name") or "").strip().lower()
+                    v = (item.get("video_file") or "").strip().lower()
+                    i = (item.get("image_file") or "").strip().lower()
+                    if a:
+                        aud_counts[a] = aud_counts.get(a, 0) + 1
+                    if v:
+                        vid_counts[v] = vid_counts.get(v, 0) + 1
+                    if i:
+                        img_counts[i] = img_counts.get(i, 0) + 1
         except Exception:
-            return {}
-    return {}
+            pass
+    return aud_counts, vid_counts, img_counts
+
+
+def pick_weighted_lru(candidates, usage_counts, key_fn, allow_repost=True):
+    """
+    Selects an asset with strict priority on unseen/unpublished items.
+    Once all items have been published at least once, uses an Exponential Decay
+    Weighted Least-Recently-Used (LRU) algorithm: weight = 1000 // (3 ** count)
+    This guarantees perpetual circulation, prevents repeating recent tracks,
+    and enables infinite recycling forever across music, video, and thumbnails.
+    """
+    if not candidates:
+        return None, False
+
+    # 1. Unused / Unpublished first
+    unseen = [c for c in candidates if key_fn(c).strip().lower() not in usage_counts]
+    if unseen:
+        return unseen[0], False
+
+    # 2. Circulation mode with Exponential Decay LRU weighting
+    if allow_repost:
+        weights = [
+            max(1, 1000 // (3 ** min(usage_counts.get(key_fn(c).strip().lower(), 0), 6)))
+            for c in candidates
+        ]
+        return random.choices(candidates, weights=weights, k=1)[0], True
+
+    return None, False
 
 
 def fetch_assets_triplet(allow_repost=True):
     """
     Fetches ONE video, ONE audio track, and ONE thumbnail image.
-    Supports Infinite Circulation Mode with Weighted Least-Recently-Used selection.
+    Supports Infinite Circulation Mode with Weighted Least-Recently-Used selection
+    across Google Drive and local cache.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vid_dir = os.path.join(script_dir, LOCAL_VIDEO_DIR)
@@ -168,67 +205,56 @@ def fetch_assets_triplet(allow_repost=True):
     local_auds = sorted(glob.glob(os.path.join(aud_dir, "*.mp3")) + glob.glob(os.path.join(aud_dir, "*.wav")))
     local_imgs = sorted(glob.glob(os.path.join(img_dir, "*.jpg")) + glob.glob(os.path.join(img_dir, "*.png")) + glob.glob(os.path.join(img_dir, "*.jpeg")))
 
-    # Resolve Audio
-    repost_counts = get_repost_counts()
+    aud_counts, vid_counts, img_counts = get_usage_counts()
+
+    # 1. Resolve Audio (Music) with Weighted LRU
     sel_audio_path = None
     is_repost = False
-
     if a_drive:
-        unpublished = [f for f in a_drive if f["name"].strip().lower() not in repost_counts]
-        if unpublished:
-            chosen = unpublished[0]
-            is_repost = False
-        elif allow_repost:
-            weights = [max(1, 1000 // (3 ** min(repost_counts.get(f["name"].strip().lower(), 0), 6))) for f in a_drive]
-            chosen = random.choices(a_drive, weights=weights, k=1)[0]
-            is_repost = True
-        else:
-            chosen = None
-
-        if chosen:
-            dest = os.path.join(aud_dir, chosen["name"])
+        chosen_a, is_repost = pick_weighted_lru(a_drive, aud_counts, lambda x: x["name"], allow_repost=allow_repost)
+        if chosen_a:
+            dest = os.path.join(aud_dir, chosen_a["name"])
             if not os.path.exists(dest):
-                download_file(chosen["id"], dest)
+                download_file(chosen_a["id"], dest)
             sel_audio_path = dest
-
-    if not sel_audio_path and local_auds:
-        unpublished = [f for f in local_auds if os.path.basename(f).strip().lower() not in repost_counts]
-        if unpublished:
-            sel_audio_path = unpublished[0]
-            is_repost = False
-        elif allow_repost:
-            weights = [max(1, 1000 // (3 ** min(repost_counts.get(os.path.basename(f).strip().lower(), 0), 6))) for f in local_auds]
-            sel_audio_path = random.choices(local_auds, weights=weights, k=1)[0]
-            is_repost = True
+    elif local_auds:
+        sel_audio_path, is_repost = pick_weighted_lru(local_auds, aud_counts, os.path.basename, allow_repost=allow_repost)
 
     if not sel_audio_path:
         print("[ERROR] No audio tracks found in Drive or local input_audio folder.")
         return None, None, None, False
 
-    # Resolve Video
+    # 2. Resolve Video Loop with Weighted LRU
     sel_video_path = None
     if v_drive:
-        chosen_v = v_drive[len(repost_counts) % len(v_drive)] if not is_repost else random.choice(v_drive)
-        dest_v = os.path.join(vid_dir, chosen_v["name"])
-        if not os.path.exists(dest_v):
-            download_file(chosen_v["id"], dest_v)
-        sel_video_path = dest_v
+        chosen_v, _ = pick_weighted_lru(v_drive, vid_counts, lambda x: x["name"], allow_repost=True)
+        if chosen_v:
+            dest_v = os.path.join(vid_dir, chosen_v["name"])
+            if not os.path.exists(dest_v):
+                download_file(chosen_v["id"], dest_v)
+            sel_video_path = dest_v
     elif local_vids:
-        sel_video_path = local_vids[len(repost_counts) % len(local_vids)] if not is_repost else random.choice(local_vids)
+        sel_video_path, _ = pick_weighted_lru(local_vids, vid_counts, os.path.basename, allow_repost=True)
 
     if not sel_video_path:
         print("[ERROR] No videos found in Drive or local input_videos folder.")
         return None, None, None, False
 
-    # Resolve Image (for thumbnail)
+    # 3. Resolve Thumbnail Image with Weighted LRU
     sel_image_path = None
     if i_drive:
-        chosen_i = i_drive[len(repost_counts) % len(i_drive)] if not is_repost else random.choice(i_drive)
-        dest_i = os.path.join(img_dir, chosen_i["name"])
-        if not os.path.exists(dest_i):
-            download_file(chosen_i["id"], dest_i)
-        sel_image_path = dest_i
+        chosen_i, _ = pick_weighted_lru(i_drive, img_counts, lambda x: x["name"], allow_repost=True)
+        if chosen_i:
+            dest_i = os.path.join(img_dir, chosen_i["name"])
+            if not os.path.exists(dest_i):
+                download_file(chosen_i["id"], dest_i)
+            sel_image_path = dest_i
     elif local_imgs:
-        sel_image_path = local_imgs[len(repost_counts) % len(local_imgs)] if not is_repost else random.choice(local_imgs)
+        sel_image_path, _ = pick_weighted_lru(local_imgs, img_counts, os.path.basename, allow_repost=True)
+
+    print(f"[ASSET PICKER] Selected Audio: {os.path.basename(sel_audio_path)}")
+    print(f"[ASSET PICKER] Selected Video: {os.path.basename(sel_video_path)}")
+    print(f"[ASSET PICKER] Selected Image: {os.path.basename(sel_image_path) if sel_image_path else 'None'}")
+    print(f"[ASSET PICKER] Circulation / Repost Mode: {is_repost}")
 
     return sel_video_path, sel_audio_path, sel_image_path, is_repost
