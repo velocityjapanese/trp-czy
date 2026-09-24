@@ -95,9 +95,17 @@ def inpaint_video_watermark(input_video, output_video):
     return output_video
 
 
-def get_video_filter_chain(width, height, upscale_to_1080p=True):
+def get_video_filter_chain(width, height, upscale_to_1080p=True, apply_color_grade=True):
     filters = []
-    # High Quality 1080p Upscaling (if input is 720p or lower)
+
+    # 1. 3D LUT Cinematic Tropical Color Grading
+    lut_path = os.path.join(SCRIPT_DIR, "assets", "luts", "tropical_cinematic.cube")
+    if apply_color_grade and os.path.exists(lut_path):
+        print("[VIDEO] Applying Cinematic 3D LUT color grading (lush emerald greens, warm sunlight, rich feathers)...")
+        safe_lut = lut_path.replace("\\", "/").replace(":", "\\:")
+        filters.append(f"lut3d=file='{safe_lut}':interp=tetrahedral")
+
+    # 2. High Quality 1080p Upscaling (if input is 720p or lower)
     if upscale_to_1080p and (width < 1920 or height < 1080):
         print(f"[VIDEO] Auto-upscaling from {width}x{height} to 1920x1080 Full HD (Lanczos + Unsharp)...")
         filters.append("scale=1920:1080:flags=lanczos+accurate_rnd")
@@ -106,12 +114,13 @@ def get_video_filter_chain(width, height, upscale_to_1080p=True):
     return ",".join(filters) if filters else "null"
 
 
-def build_tropical_longform_video(input_video, input_audio, output_path, duration_seconds=3600, remove_watermark=True, upscale_to_1080p=True):
+def build_tropical_longform_video(input_video, input_audio, output_path, duration_seconds=3600, remove_watermark=True, upscale_to_1080p=True, apply_color_grade=True):
     """
-    Main entry point to render 1080p HD Tropical Music video with watermark removal and seamless loop.
+    Main entry point to render 1080p HD Tropical Music video with watermark removal,
+    cinematic 3D LUT color grading, and seamless ping-pong loop.
     """
     print("\n" + "=" * 60)
-    print("RENDERING TROPICOZY VIDEO (WATERMARK REMOVAL ACTIVE)")
+    print("RENDERING TROPICOZY VIDEO (WATERMARK REMOVAL & 3D LUT ACTIVE)")
     print("=" * 60)
     print(f"  Input Video: {os.path.basename(input_video)}")
     print(f"  Input Audio: {os.path.basename(input_audio)}")
@@ -122,7 +131,7 @@ def build_tropical_longform_video(input_video, input_audio, output_path, duratio
     temp_clean = os.path.join(SCRIPT_DIR, "temp_clean.mp4")
     temp_block = os.path.join(SCRIPT_DIR, "temp_block.mp4")
 
-    # Step 1: Remove watermark via Astroid inpaint & Upscale
+    # Step 1: Remove watermark via Astroid inpaint & Upscale + Color Grade
     source_to_upscale = input_video
     if remove_watermark:
         print("[VIDEO] Applying high-precision astroid inpainting to remove Google Flow watermark...")
@@ -130,7 +139,7 @@ def build_tropical_longform_video(input_video, input_audio, output_path, duratio
         source_to_upscale = temp_inpaint
 
     w, h, orig_dur = get_media_info(source_to_upscale)
-    vf_arg = get_video_filter_chain(w, h, upscale_to_1080p=upscale_to_1080p)
+    vf_arg = get_video_filter_chain(w, h, upscale_to_1080p=upscale_to_1080p, apply_color_grade=apply_color_grade)
 
     cmd_clean = [
         "ffmpeg", "-y",
