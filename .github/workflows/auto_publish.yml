@@ -5,16 +5,6 @@ on:
     # Runs daily at 9:00 AM UTC
     - cron: '0 9 * * *'
   workflow_dispatch:
-    inputs:
-      duration:
-        description: 'Video duration in seconds (default 3600 = 1 hour)'
-        required: false
-        default: '3600'
-      dry_run:
-        description: 'Dry run (test video/thumbnail generation without YouTube upload)'
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: write
@@ -61,15 +51,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run automation pipeline
+      - name: Run automation pipeline (1-Hour 1080p HD)
         run: |
-          echo "Starting Tropicozy 1-Hour Long-Form publishing pipeline..."
-          DURATION="${{ github.event.inputs.duration || '3600' }}"
-          DRY_RUN_FLAG=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            DRY_RUN_FLAG="--dry-run"
-          fi
-          python auto_pipeline.py --duration "$DURATION" $DRY_RUN_FLAG
+          echo "Starting Tropicozy 1-Hour (3600s) 1080p Full HD publishing pipeline..."
+          python auto_pipeline.py --duration 3600
 
       - name: Commit published videos log
         if: always()
