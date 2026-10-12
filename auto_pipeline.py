@@ -240,6 +240,19 @@ def run_pipeline(duration=3600, dry_run=False, video_override=None, audio_overri
         return True
 
     # Step 5: Upload to YouTube & Set Custom Thumbnail
+    upload_yt = os.getenv("UPLOAD_YOUTUBE", "true").lower()
+    if upload_yt in ("false", "0", "no"):
+        print("\n[STEP 5] ⏸️ Skipping YouTube upload (UPLOAD_YOUTUBE=false).")
+        save_published_entry(vid_path, aud_path, img_path, yt_video_id=None, title=title)
+        # Step 6: Cleanup rendered video to free disk space
+        if os.path.exists(final_video_path):
+            try:
+                os.remove(final_video_path)
+                print(f"[CLEANUP] Deleted rendered video to save disk space: {final_video_path}")
+            except Exception:
+                pass
+        return True
+
     try:
         from publish_youtube import upload_to_youtube, set_video_thumbnail
         print(f"\n[STEP 5] Uploading 1-Hour Video to YouTube...")
